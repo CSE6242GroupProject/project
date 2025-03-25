@@ -1,0 +1,37 @@
+# Project Guidelines for Claude
+
+Lint each file you update or create to ensure correctness of syntax.
+
+Review the Svelte 5 syntax at https://svelte.dev/docs/svelte.
+
+## Commands
+
+- **Development**: `bun run dev` - Starts dev server
+- **Build**: `bun run build` - Builds production version
+- **Lint**: `bun run lint` - Runs Prettier and ESLint
+- **Format**: `bun run format` - Auto-formats code with Prettier
+- **Type Check**: `bun run check` - Validates TypeScript types
+
+## Code Style
+
+- **Framework**: SvelteKit with Svelte 5 runes and TypeScript
+- **Formatting**: Prettier with tailwind plugin (2-space indent, single quotes)
+- **CSS**: TailwindCSS for styling
+- **Types**: Strict TypeScript, explicit type annotations for function params and returns
+- **Imports**: Group imports: Svelte first, third-party libs next, local modules last
+- **Error Handling**: Use try/catch with specific error types, provide fallback UI
+
+## Naming Conventions
+
+- **Components**: PascalCase
+- **Functions**: camelCase
+- **Variables**: camelCase
+- **Constants**: camelCase (not UPPER_CASE)
+- **Types/Interfaces**: PascalCase, prefixed with type for type aliases
+
+## Data Visualization
+
+- Use D3.js for visualizations
+- TopoJSON/GeoJSON for map data
+- Maintain responsive SVG containers
+- Properly type data structures and D3 selections
