@@ -28,7 +28,6 @@
 		region: 'County'
 	});
 
-	// Title derived from state
 	let title = $state('Cancer Prediction Rates by County');
 
 	// SVG dimensions
@@ -44,53 +43,22 @@
 	let svg: d3.Selection<SVGSVGElement, unknown, null, undefined>;
 	let mapGroup: d3.Selection<SVGGElement, unknown, null, undefined>;
 
-	// Watch for filter changes and update map
-	$effect(() => {
-		if (mapContainer) {
-			renderMap();
-		}
-	});
-
-	onMount(() => {
-		renderMap();
-	});
-
 	// Get unique years and cancer types from data for filters
 	const uniqueYears = [...new Set(cancerData.map((d: CancerData) => d.year))].sort();
 	const uniqueCancerTypes = [...new Set(cancerData.map((d: CancerData) => d.cancer_type))].sort();
 
-	function renderMap() {
-		// Clear previous map if it exists
-		if (mapContainer) {
-			d3.select(mapContainer).selectAll('*').remove();
-		}
+	// Pre-compute county paths and only redraw colors
+	let counties: FeatureCollection;
+	let nation: Feature<Geometry>;
+	let stateBorders: Geometry;
+	let path: d3.GeoPath<any, d3.GeoPermissibleObjects>;
+	let countyPaths: d3.Selection<SVGPathElement, any, SVGGElement, unknown>;
+	let colorScale: d3.ScaleQuantize<string>;
+	let predictionExtent: [number, number];
+	let legendGroup: d3.Selection<SVGGElement, unknown, null, undefined>;
 
-		// Get container dimensions
-		const containerRect = mapContainer.getBoundingClientRect();
-		const containerWidth = containerRect.width;
-		const containerHeight = containerRect.height;
-
-		// Adjust dimensions based on container
-		width = containerWidth || 960;
-		height = containerHeight || 600;
-
-		// Extract GeoJSON from TopoJSON
-		const counties = feature(
-			data.countyGeoData,
-			data.countyGeoData.objects.counties
-		) as unknown as FeatureCollection;
-
-		const nation = feature(
-			data.countyGeoData,
-			data.countyGeoData.objects.nation
-		) as unknown as Feature<Geometry>;
-
-		const stateBorders = mesh(
-			data.countyGeoData,
-			data.countyGeoData.objects.states,
-			(a, b) => a !== b
-		) as unknown as Geometry;
-
+	// Function to get filtered data and calculate the prediction map
+	function getFilteredData() {
 		// Filter data based on selected filters
 		const filteredData = cancerData.filter((d: CancerData) => {
 			return d.year === filterState.year && d.cancer_type === filterState.cancer_type;
@@ -104,22 +72,170 @@
 		});
 
 		// Find the domain for the color scale from the actual data
-		const predictionExtent = d3.extent(filteredData, (d) => d.prediction) as [number, number];
+		predictionExtent = d3.extent(filteredData, (d) => d.prediction) as [number, number];
 
-		// Create color scale using quantized Reds scheme, specifying string output type
-		const colorScale = d3
-			.scaleQuantize<string>() // Specify <string> output type
-			.domain(predictionExtent)
-			.range(d3.schemeYlOrRd[9]); // Using 9 color steps
+		// Create color scale using quantized Reds scheme
+		colorScale = d3.scaleQuantize<string>().domain(predictionExtent).range(d3.schemeYlOrRd[9]);
 
-		// Create projection for the map with padding
+		return { filteredData, cancerDataByCounty };
+	}
+
+	// Function to update map colors without redrawing
+	function updateMapColors() {
+		if (!countyPaths) return;
+
+		const { cancerDataByCounty } = getFilteredData();
+
+		// Update only the colors of the counties
+		countyPaths.attr('fill', (d: any) => {
+			const prediction = cancerDataByCounty.get(d.id);
+			return prediction !== undefined ? colorScale(prediction) : '#ccc';
+		});
+
+		// Update the tooltip data
+		countyPaths.on('mouseover', function (event, d: any) {
+			if (!tooltipElement) return;
+			const prediction = cancerDataByCounty.get(d.id);
+			const tooltipText =
+				prediction !== undefined
+					? `FIPS: ${d.id}\nRate: ${prediction.toFixed(2)}`
+					: `FIPS: ${d.id}\nNo data`;
+
+			tooltipElement.textContent = tooltipText;
+			tooltipElement.classList.remove('hidden');
+			d3.select(this).style('opacity', 0.7); // Highlight path
+		});
+
+		updateLegend();
+	}
+
+	// Update just the legend without redrawing the entire map
+	function updateLegend() {
+		if (!legendGroup) return;
+
+		// Clear previous legend content
+		legendGroup.selectAll('*').remove();
+
+		const legendWidth = 300;
+		const numColors = d3.schemeYlOrRd[9].length;
+		const step = (predictionExtent[1] - predictionExtent[0]) / numColors;
+		const thresholds = Array.from({ length: numColors }, (_, i) => predictionExtent[0] + i * step);
+
+		// Add legend title
+		legendGroup
+			.append('text')
+			.attr('class', 'legend-title')
+			.attr('fill', 'currentColor')
+			.attr('font-weight', 'medium')
+			.attr('x', 0)
+			.attr('y', 0)
+			.text('Cancer Prediction Rate');
+
+		// Add color rectangles, ticks, and labels for each threshold
+		thresholds.forEach((tick, i) => {
+			const xPosition = i * (legendWidth / numColors);
+			const yPosition = 10;
+
+			// --- Draw Color Rectangle ---
+			legendGroup
+				.append('rect')
+				.attr('fill', colorScale(tick))
+				.attr('x', xPosition)
+				.attr('y', yPosition)
+				.attr('height', 10)
+				.attr('width', legendWidth / numColors);
+
+			// --- Draw Tick Line ---
+			legendGroup
+				.append('line')
+				.attr('stroke', 'currentColor')
+				.attr('x1', xPosition)
+				.attr('x2', xPosition)
+				.attr('y1', yPosition)
+				.attr('y2', yPosition + 20);
+
+			// --- Draw Tick Label ---
+			legendGroup
+				.append('text')
+				.attr('fill', 'currentColor')
+				.attr('text-anchor', 'middle')
+				.attr('dominant-baseline', 'middle')
+				.attr('x', xPosition)
+				.attr('y', yPosition + 35)
+				.attr('font-size', '12px')
+				.text(tick.toFixed(2));
+		});
+
+		// --- Add Final Tick and Label for Maximum Value ---
+		const finalXPosition = legendWidth;
+		const finalYPosition = 10;
+		const maxValue = predictionExtent[1];
+
+		// Add final tick line
+		legendGroup
+			.append('line')
+			.attr('stroke', 'currentColor')
+			.attr('x1', finalXPosition)
+			.attr('x2', finalXPosition)
+			.attr('y1', finalYPosition)
+			.attr('y2', finalYPosition + 20);
+
+		// Add final tick label
+		legendGroup
+			.append('text')
+			.attr('fill', 'currentColor')
+			.attr('text-anchor', 'middle')
+			.attr('dominant-baseline', 'middle')
+			.attr('x', finalXPosition)
+			.attr('y', finalYPosition + 35)
+			.attr('font-size', '12px')
+			.text(maxValue.toFixed(2));
+	}
+
+	// Initialize the map - only runs once
+	function initializeMap() {
+		if (!mapContainer) return;
+
+		// Clear any existing content
+		d3.select(mapContainer).selectAll('*').remove();
+
+		// Get container dimensions
+		const containerRect = mapContainer.getBoundingClientRect();
+		const containerWidth = containerRect.width;
+		const containerHeight = containerRect.height;
+
+		// Adjust dimensions based on container
+		width = containerWidth || 960;
+		height = containerHeight || 600;
+
+		// Extract GeoJSON from TopoJSON - do this only once
+		counties = feature(
+			data.countyGeoData,
+			data.countyGeoData.objects.counties
+		) as unknown as FeatureCollection;
+
+		nation = feature(
+			data.countyGeoData,
+			data.countyGeoData.objects.nation
+		) as unknown as Feature<Geometry>;
+
+		stateBorders = mesh(
+			data.countyGeoData,
+			data.countyGeoData.objects.states,
+			(a, b) => a !== b
+		) as unknown as Geometry;
+
+		// Get filtered data and color scale
+		const { cancerDataByCounty } = getFilteredData();
+
+		// Create projection for the map
 		const projection = d3
 			.geoAlbersUsa()
 			.fitSize([width - 80, height - 80], nation)
 			.translate([width / 2, height / 2]);
 
-		// Ensure the path generator uses the projection
-		const path = d3.geoPath().projection(projection);
+		// Path generator
+		path = d3.geoPath().projection(projection);
 
 		// Create SVG
 		svg = d3
@@ -129,24 +245,24 @@
 			.attr('height', '100%')
 			.attr('viewBox', [0, 0, width, height])
 			.attr('preserveAspectRatio', 'xMidYMid meet')
-			.attr('class', 'max-w-full h-auto mx-auto'); // Added mx-auto for centering if needed
+			.attr('class', 'max-w-full h-auto mx-auto');
 
 		// Create a group for all map elements that will be zoomed
 		mapGroup = svg.append('g');
 
-		// Draw counties with improved styling and interactivity + tooltips
-		mapGroup
+		// Draw counties - store selection for later updates
+		countyPaths = mapGroup
 			.append('g')
-			.attr('class', 'counties') // Group counties
-			.selectAll('path')
+			.attr('class', 'counties')
+			.selectAll<SVGPathElement, any>('path')
 			.data(counties.features)
 			.join('path')
 			.attr('fill', (d: any) => {
 				const prediction = cancerDataByCounty.get(d.id);
 				return prediction !== undefined ? colorScale(prediction) : '#ccc';
 			})
-			.attr('d', path) // Use the path generator with projection
-			.attr('class', 'county-path') // Add class for styling/hover
+			.attr('d', path)
+			.attr('class', 'county-path')
 			.on('mouseover', function (event, d: any) {
 				if (!tooltipElement) return;
 				const prediction = cancerDataByCounty.get(d.id);
@@ -157,32 +273,31 @@
 
 				tooltipElement.textContent = tooltipText;
 				tooltipElement.classList.remove('hidden');
-				d3.select(this).style('opacity', 0.7); // Highlight path
+				d3.select(this).style('opacity', 0.7);
 			})
 			.on('mousemove', function (event) {
 				if (!tooltipElement) return;
-				// Position tooltip near cursor
 				tooltipElement.style.left = `${event.pageX + 15}px`;
 				tooltipElement.style.top = `${event.pageY + 10}px`;
 			})
 			.on('mouseout', function () {
 				if (!tooltipElement) return;
 				tooltipElement.classList.add('hidden');
-				d3.select(this).style('opacity', 1); // Remove highlight
+				d3.select(this).style('opacity', 1);
 			});
 
-		// Draw state borders with improved styling
+		// Draw state borders
 		mapGroup
 			.append('path')
 			.datum(stateBorders)
 			.attr('fill', 'none')
-			.attr('stroke', 'white') // Use white for contrast on darker reds
+			.attr('stroke', 'white')
 			.attr('stroke-width', '0.5')
 			.attr('stroke-linejoin', 'round')
-			.attr('class', 'state-borders') // Add class for styling
-			.attr('d', path); // Use the path generator with projection
+			.attr('class', 'state-borders')
+			.attr('d', path);
 
-		// Add zoom behavior (remains the same)
+		// Add zoom behavior
 		zoom = d3
 			.zoom<SVGSVGElement, unknown>()
 			.scaleExtent([1, 8])
@@ -194,94 +309,31 @@
 				mapGroup.attr('transform', event.transform);
 			});
 
-		// Initialize the zoom (remains the same)
+		// Initialize the zoom
 		svg.call(zoom);
 
-		// Create legend
-		const legendWidth = 300;
-		const numColors = d3.schemeYlOrRd[9].length; // Use the actual length of the color scheme array
-		const step = (predictionExtent[1] - predictionExtent[0]) / numColors;
-		// Thresholds represent the START value for each color block
-		const thresholds = Array.from({ length: numColors }, (_, i) => predictionExtent[0] + i * step);
-
-		// Create legend group
-		const legend = svg
+		// Create legend group - we'll update its contents when filters change
+		legendGroup = svg
 			.append('g')
 			.attr('class', 'legend')
-			.attr('transform', `translate(${(width - legendWidth) / 2}, 20)`);
+			.attr('transform', `translate(${(width - 300) / 2}, 20)`);
 
-		// Add legend title
-		legend
-			.append('text')
-			.attr('class', 'legend-title')
-			.attr('fill', 'currentColor')
-			.attr('font-weight', 'medium') // Keep updated font weight
-			.attr('x', 0)
-			.attr('y', 0)
-			.text('Cancer Prediction Rate');
-
-		// Add color rectangles, ticks, and labels for each threshold
-		thresholds.forEach((tick, i) => {
-			const xPosition = i * (legendWidth / numColors);
-			const yPosition = 10; // Y position for the color rects
-
-			// --- Draw Color Rectangle ---
-			legend
-				.append('rect')
-				.attr('fill', colorScale(tick)) // Color corresponds to the range starting at 'tick'
-				.attr('x', xPosition)
-				.attr('y', yPosition)
-				.attr('height', 10)
-				.attr('width', legendWidth / numColors);
-
-			// --- Draw Tick Line ---
-			// Draw tick line for all thresholds, including the first one
-			legend
-				.append('line')
-				.attr('stroke', 'currentColor')
-				.attr('x1', xPosition)
-				.attr('x2', xPosition)
-				.attr('y1', yPosition) // Start line at the bottom of the rect
-				.attr('y2', yPosition + 20); // Extend line downwards
-
-			// --- Draw Tick Label ---
-			// Draw label for all thresholds, including the first one
-			legend
-				.append('text')
-				.attr('fill', 'currentColor')
-				.attr('text-anchor', 'middle')
-				.attr('dominant-baseline', 'middle')
-				.attr('x', xPosition)
-				.attr('y', yPosition + 35) // Use updated Y position for labels
-				.attr('font-size', '12px') // Keep updated font size
-				.text(tick.toFixed(2));
-		});
-
-		// --- Add Final Tick and Label for Maximum Value ---
-		const finalXPosition = legendWidth; // Position at the very end of the legend bar
-		const finalYPosition = 10;
-		const maxValue = predictionExtent[1];
-
-		// Add final tick line
-		legend
-			.append('line')
-			.attr('stroke', 'currentColor')
-			.attr('x1', finalXPosition)
-			.attr('x2', finalXPosition)
-			.attr('y1', finalYPosition)
-			.attr('y2', finalYPosition + 20);
-
-		// Add final tick label
-		legend
-			.append('text')
-			.attr('fill', 'currentColor')
-			.attr('text-anchor', 'middle')
-			.attr('dominant-baseline', 'middle')
-			.attr('x', finalXPosition)
-			.attr('y', finalYPosition + 35) // Use updated Y position
-			.attr('font-size', '12px') // Keep updated font size
-			.text(maxValue.toFixed(2));
+		// Initial legend creation
+		updateLegend();
 	}
+
+	// Initialize the map when component mounts
+	onMount(() => {
+		initializeMap();
+	});
+
+	// Watch for filter changes and update only what's needed
+	$effect(() => {
+		// Re-render just the colors when filters change
+		if (countyPaths) {
+			updateMapColors();
+		}
+	});
 
 	// Zoom functions remain the same
 	function zoomIn() {
@@ -370,8 +422,6 @@
 
 	:global(.county-path:hover) {
 		opacity: 0.8; /* Slightly fade on hover */
-		/* stroke: #333; /* Optional: darker stroke on hover */
-		/* stroke-width: 0.3; */
 	}
 
 	:global(.state-borders) {
