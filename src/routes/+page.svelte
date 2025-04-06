@@ -129,7 +129,7 @@
 			.attr('font-weight', 'medium')
 			.attr('x', 0)
 			.attr('y', 0)
-			.text('Cancer Prediction Rate');
+			.text('Deaths per 100,000');
 
 		// Add color rectangles, ticks, and labels for each threshold
 		thresholds.forEach((tick, i) => {
