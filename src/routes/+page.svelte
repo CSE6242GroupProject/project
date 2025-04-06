@@ -5,35 +5,30 @@
 	import { feature, mesh } from 'topojson-client';
 	import type { PageProps } from './$types';
 
-	// Define the PesticideData type
-	type PesticideData = {
-		countyId: string;
-		pesticideType: string;
-		pesticideUsage: number;
-		cancerRate: number;
+	// Define the CancerData type to match your JSON structure
+	type CancerData = {
 		year: number;
+		state_fips_code: number;
+		county_fips_code: number;
+		cancer_type: string;
+		prediction: number;
 	};
 
 	// Import data from load function using Svelte 5 runes
 	let { data }: PageProps = $props();
 
+	// Ensure cancerData exists with a default empty array
+	const cancerData = data.cancerData ?? [];
+
 	// States for the filters
 	let filterState = $state({
-		indicator: 'Pesticide Impact',
+		year: 1992, // Updated to match your data's starting year
+		cancer_type: 'Brain and nervous system cancer', // Updated to match your data
 		location: 'All',
-		region: 'County',
-		year: 2022,
-		pesticideType: 'All',
-		sex: 'Both'
+		region: 'County'
 	});
 
-	// Title derived from state
-	let title = $state(`Impact of Pesticides on Cancer Rates by County (${filterState.year})`);
-
-	// Update title when year changes
-	$effect(() => {
-		title = `Impact of Pesticides on Cancer Rates by County (${filterState.year})`;
-	});
+	let title = $state('Cancer Prediction Rates by County');
 
 	// SVG dimensions
 	let width = 960;
@@ -41,38 +36,168 @@
 
 	// Create a container for the map
 	let mapContainer: HTMLDivElement;
+	let tooltipElement: HTMLDivElement; // Add this line for the tooltip div
 
 	// Store zoom behavior to reference in zoom buttons
 	let zoom: d3.ZoomBehavior<SVGSVGElement, unknown>;
 	let svg: d3.Selection<SVGSVGElement, unknown, null, undefined>;
 	let mapGroup: d3.Selection<SVGGElement, unknown, null, undefined>;
 
-	// Watch for filter changes and update map
-	$effect(() => {
-		if (mapContainer) {
-			renderMap();
-		}
-	});
+	// Get unique years and cancer types from data for filters
+	const uniqueYears = [...new Set(cancerData.map((d: CancerData) => d.year))].sort();
+	const uniqueCancerTypes = [...new Set(cancerData.map((d: CancerData) => d.cancer_type))].sort();
 
-	onMount(() => {
-		renderMap();
-	});
+	// Pre-compute county paths and only redraw colors
+	let counties: FeatureCollection;
+	let nation: Feature<Geometry>;
+	let stateBorders: Geometry;
+	let path: d3.GeoPath<any, d3.GeoPermissibleObjects>;
+	let countyPaths: d3.Selection<SVGPathElement, any, SVGGElement, unknown>;
+	let colorScale: d3.ScaleQuantize<string>;
+	let predictionExtent: [number, number];
+	let legendGroup: d3.Selection<SVGGElement, unknown, null, undefined>;
 
-	// Year control handlers
-	function decrementYear() {
-		filterState.year = Math.max(2015, filterState.year - 1);
+	// Function to get filtered data and calculate the prediction map
+	function getFilteredData() {
+		// Filter data based on selected filters
+		const filteredData = cancerData.filter((d: CancerData) => {
+			return d.year === filterState.year && d.cancer_type === filterState.cancer_type;
+		});
+
+		// Create map of cancer data by county ID for easy lookup
+		const cancerDataByCounty = new Map<string, number>();
+		filteredData.forEach((d: CancerData) => {
+			const fips = `${d.state_fips_code.toString().padStart(2, '0')}${d.county_fips_code.toString().padStart(3, '0')}`;
+			cancerDataByCounty.set(fips, d.prediction);
+		});
+
+		// Find the domain for the color scale from the actual data
+		predictionExtent = d3.extent(filteredData, (d) => d.prediction) as [number, number];
+
+		// Create color scale using quantized Reds scheme
+		colorScale = d3.scaleQuantize<string>().domain(predictionExtent).range(d3.schemeYlOrRd[9]);
+
+		return { filteredData, cancerDataByCounty };
 	}
 
-	function incrementYear() {
-		filterState.year = Math.min(2022, filterState.year + 1);
+	// Function to update map colors without redrawing
+	function updateMapColors() {
+		if (!countyPaths) return;
+
+		const { cancerDataByCounty } = getFilteredData();
+
+		// Update only the colors of the counties
+		countyPaths.attr('fill', (d: any) => {
+			const prediction = cancerDataByCounty.get(d.id);
+			return prediction !== undefined ? colorScale(prediction) : '#ccc';
+		});
+
+		// Update the tooltip data
+		countyPaths.on('mouseover', function (event, d: any) {
+			if (!tooltipElement) return;
+			const prediction = cancerDataByCounty.get(d.id);
+			const tooltipText =
+				prediction !== undefined
+					? `FIPS: ${d.id}\nRate: ${prediction.toFixed(2)}`
+					: `FIPS: ${d.id}\nNo data`;
+
+			tooltipElement.textContent = tooltipText;
+			tooltipElement.classList.remove('hidden');
+			d3.select(this).style('opacity', 0.7); // Highlight path
+		});
+
+		updateLegend();
 	}
 
-	function renderMap() {
-		// Clear previous map if it exists
-		if (mapContainer) {
-			// Use D3 to clear the container instead of direct DOM manipulation
-			d3.select(mapContainer).selectAll('*').remove();
-		}
+	// Update just the legend without redrawing the entire map
+	function updateLegend() {
+		if (!legendGroup) return;
+
+		// Clear previous legend content
+		legendGroup.selectAll('*').remove();
+
+		const legendWidth = 300;
+		const numColors = d3.schemeYlOrRd[9].length;
+		const step = (predictionExtent[1] - predictionExtent[0]) / numColors;
+		const thresholds = Array.from({ length: numColors }, (_, i) => predictionExtent[0] + i * step);
+
+		// Add legend title
+		legendGroup
+			.append('text')
+			.attr('class', 'legend-title')
+			.attr('fill', 'currentColor')
+			.attr('font-weight', 'medium')
+			.attr('x', 0)
+			.attr('y', 0)
+			.text('Cancer Prediction Rate');
+
+		// Add color rectangles, ticks, and labels for each threshold
+		thresholds.forEach((tick, i) => {
+			const xPosition = i * (legendWidth / numColors);
+			const yPosition = 10;
+
+			// --- Draw Color Rectangle ---
+			legendGroup
+				.append('rect')
+				.attr('fill', colorScale(tick))
+				.attr('x', xPosition)
+				.attr('y', yPosition)
+				.attr('height', 10)
+				.attr('width', legendWidth / numColors);
+
+			// --- Draw Tick Line ---
+			legendGroup
+				.append('line')
+				.attr('stroke', 'currentColor')
+				.attr('x1', xPosition)
+				.attr('x2', xPosition)
+				.attr('y1', yPosition)
+				.attr('y2', yPosition + 20);
+
+			// --- Draw Tick Label ---
+			legendGroup
+				.append('text')
+				.attr('fill', 'currentColor')
+				.attr('text-anchor', 'middle')
+				.attr('dominant-baseline', 'middle')
+				.attr('x', xPosition)
+				.attr('y', yPosition + 35)
+				.attr('font-size', '12px')
+				.text(tick.toFixed(2));
+		});
+
+		// --- Add Final Tick and Label for Maximum Value ---
+		const finalXPosition = legendWidth;
+		const finalYPosition = 10;
+		const maxValue = predictionExtent[1];
+
+		// Add final tick line
+		legendGroup
+			.append('line')
+			.attr('stroke', 'currentColor')
+			.attr('x1', finalXPosition)
+			.attr('x2', finalXPosition)
+			.attr('y1', finalYPosition)
+			.attr('y2', finalYPosition + 20);
+
+		// Add final tick label
+		legendGroup
+			.append('text')
+			.attr('fill', 'currentColor')
+			.attr('text-anchor', 'middle')
+			.attr('dominant-baseline', 'middle')
+			.attr('x', finalXPosition)
+			.attr('y', finalYPosition + 35)
+			.attr('font-size', '12px')
+			.text(maxValue.toFixed(2));
+	}
+
+	// Initialize the map - only runs once
+	function initializeMap() {
+		if (!mapContainer) return;
+
+		// Clear any existing content
+		d3.select(mapContainer).selectAll('*').remove();
 
 		// Get container dimensions
 		const containerRect = mapContainer.getBoundingClientRect();
@@ -83,48 +208,34 @@
 		width = containerWidth || 960;
 		height = containerHeight || 600;
 
-		// Extract GeoJSON from TopoJSON
-		const counties = feature(
+		// Extract GeoJSON from TopoJSON - do this only once
+		counties = feature(
 			data.countyGeoData,
 			data.countyGeoData.objects.counties
 		) as unknown as FeatureCollection;
 
-		const nation = feature(
+		nation = feature(
 			data.countyGeoData,
 			data.countyGeoData.objects.nation
 		) as unknown as Feature<Geometry>;
 
-		const stateBorders = mesh(
+		stateBorders = mesh(
 			data.countyGeoData,
 			data.countyGeoData.objects.states,
 			(a, b) => a !== b
 		) as unknown as Geometry;
 
-		// Filter data based on selected filters
-		const filteredData =
-			data.pesticidesData?.filter((d: PesticideData) => {
-				return (
-					(filterState.pesticideType === 'All' || d.pesticideType === filterState.pesticideType) &&
-					d.year === filterState.year
-				);
-			}) || [];
+		// Get filtered data and color scale
+		const { cancerDataByCounty } = getFilteredData();
 
-		// Create map of pesticide data by county ID for easy lookup
-		const pesticidesDataByCounty = new Map<string, PesticideData>();
-		filteredData.forEach((d: PesticideData) => {
-			pesticidesDataByCounty.set(d.countyId, d);
-		});
-
-		// Create color scale - using RdYlBu but reversed as in the image
-		const colorScale = d3.scaleSequential(d3.interpolateRdYlBu).domain([0.6, 0]); // Higher values (more cancer) are red, lower are blue
-
-		// Create projection for the map with padding
+		// Create projection for the map
 		const projection = d3
 			.geoAlbersUsa()
 			.fitSize([width - 80, height - 80], nation)
 			.translate([width / 2, height / 2]);
 
-		const path = d3.geoPath().projection(projection);
+		// Path generator
+		path = d3.geoPath().projection(projection);
 
 		// Create SVG
 		svg = d3
@@ -134,10 +245,57 @@
 			.attr('height', '100%')
 			.attr('viewBox', [0, 0, width, height])
 			.attr('preserveAspectRatio', 'xMidYMid meet')
-			.attr('class', 'max-w-full h-auto');
+			.attr('class', 'max-w-full h-auto mx-auto');
 
 		// Create a group for all map elements that will be zoomed
-		mapGroup = svg.append('g') as d3.Selection<SVGGElement, unknown, null, undefined>;
+		mapGroup = svg.append('g');
+
+		// Draw counties - store selection for later updates
+		countyPaths = mapGroup
+			.append('g')
+			.attr('class', 'counties')
+			.selectAll<SVGPathElement, any>('path')
+			.data(counties.features)
+			.join('path')
+			.attr('fill', (d: any) => {
+				const prediction = cancerDataByCounty.get(d.id);
+				return prediction !== undefined ? colorScale(prediction) : '#ccc';
+			})
+			.attr('d', path)
+			.attr('class', 'county-path')
+			.on('mouseover', function (event, d: any) {
+				if (!tooltipElement) return;
+				const prediction = cancerDataByCounty.get(d.id);
+				const tooltipText =
+					prediction !== undefined
+						? `FIPS: ${d.id}\nRate: ${prediction.toFixed(2)}`
+						: `FIPS: ${d.id}\nNo data`;
+
+				tooltipElement.textContent = tooltipText;
+				tooltipElement.classList.remove('hidden');
+				d3.select(this).style('opacity', 0.7);
+			})
+			.on('mousemove', function (event) {
+				if (!tooltipElement) return;
+				tooltipElement.style.left = `${event.pageX + 15}px`;
+				tooltipElement.style.top = `${event.pageY + 10}px`;
+			})
+			.on('mouseout', function () {
+				if (!tooltipElement) return;
+				tooltipElement.classList.add('hidden');
+				d3.select(this).style('opacity', 1);
+			});
+
+		// Draw state borders
+		mapGroup
+			.append('path')
+			.datum(stateBorders)
+			.attr('fill', 'none')
+			.attr('stroke', 'white')
+			.attr('stroke-width', '0.5')
+			.attr('stroke-linejoin', 'round')
+			.attr('class', 'state-borders')
+			.attr('d', path);
 
 		// Add zoom behavior
 		zoom = d3
@@ -154,94 +312,42 @@
 		// Initialize the zoom
 		svg.call(zoom);
 
-		// Draw counties
-		const countyPaths = mapGroup
+		// Create legend group - we'll update its contents when filters change
+		legendGroup = svg
 			.append('g')
-			.selectAll('path')
-			.data(counties.features)
-			.join('path')
-			.attr('fill', (d: any) => {
-				const countyData = pesticidesDataByCounty.get(d.id);
-				return countyData ? colorScale(countyData.cancerRate) : '#ccc';
-			})
-			.attr('d', path as any)
-			.attr('stroke', '#fff')
-			.attr('stroke-width', 0.1);
+			.attr('class', 'legend')
+			.attr('transform', `translate(${(width - 300) / 2}, 20)`);
 
-		// Draw state borders
-		mapGroup
-			.append('path')
-			.datum(stateBorders)
-			.attr('fill', 'none')
-			.attr('stroke', '#000')
-			.attr('stroke-width', 0.5)
-			.attr('d', path);
-
-		// Create legend - keep legend outside of the zoom group
-		const legendWidth = 400;
-		const legendHeight = 20;
-
-		// Create legend scale
-		const legendX = d3.scaleLinear().domain([0, 0.6]).range([0, legendWidth]);
-		const legendAxis = d3.axisBottom(legendX).tickSize(13).ticks(8);
-
-		// Position legend with more space from the bottom
-		const legend = svg
-			.append('g')
-			.attr('transform', `translate(${(width - legendWidth) / 2}, ${height - 30})`);
-
-		// Create gradient for legend
-		const defs = svg.append('defs');
-		const linearGradient = defs
-			.append('linearGradient')
-			.attr('id', 'legend-gradient')
-			.attr('x1', '0%')
-			.attr('y1', '0%')
-			.attr('x2', '100%')
-			.attr('y2', '0%');
-
-		// Add color stops to gradient
-		const stops = d3.range(0, 1.01, 0.1);
-		stops.forEach((stop) => {
-			linearGradient
-				.append('stop')
-				.attr('offset', `${stop * 100}%`)
-				.attr('stop-color', colorScale(0.6 * (1 - stop)));
-		});
-
-		// Draw colored rectangle using gradient
-		legend
-			.append('rect')
-			.attr('x', 0)
-			.attr('y', 0)
-			.attr('width', legendWidth)
-			.attr('height', legendHeight)
-			.style('fill', 'url(#legend-gradient)');
-
-		// Add axis to legend
-		legend
-			.append('g')
-			.call(legendAxis)
-			.selectAll('text')
-			.style('text-anchor', 'middle')
-			.attr('dy', '10px');
+		// Initial legend creation
+		updateLegend();
 	}
 
-	// Zoom in function
+	// Initialize the map when component mounts
+	onMount(() => {
+		initializeMap();
+	});
+
+	// Watch for filter changes and update only what's needed
+	$effect(() => {
+		// Re-render just the colors when filters change
+		if (countyPaths) {
+			updateMapColors();
+		}
+	});
+
+	// Zoom functions remain the same
 	function zoomIn() {
 		if (svg && zoom) {
 			svg.transition().duration(300).call(zoom.scaleBy, 1.5);
 		}
 	}
 
-	// Zoom out function
 	function zoomOut() {
 		if (svg && zoom) {
 			svg.transition().duration(300).call(zoom.scaleBy, 0.75);
 		}
 	}
 
-	// Reset zoom function
 	function resetZoom() {
 		if (svg && zoom) {
 			svg.transition().duration(300).call(zoom.transform, d3.zoomIdentity);
@@ -250,89 +356,38 @@
 </script>
 
 <div class="container mx-auto px-4 py-8">
-	<h1 class="mb-6 text-3xl font-bold">{title}</h1>
+	<h1 class="mb-6 text-3xl">{title}</h1>
 
 	<!-- Filter controls -->
-	<div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
-		<div>
-			<label for="indicator-select" class="mb-1 block text-sm font-medium">Indicator</label>
-			<select
-				id="indicator-select"
-				bind:value={filterState.indicator}
-				class="w-full rounded border p-2"
-			>
-				<option>Pesticide Impact</option>
-			</select>
-		</div>
-
-		<div>
-			<label for="location-select" class="mb-1 block text-sm font-medium">Locations</label>
-			<select
-				id="location-select"
-				bind:value={filterState.location}
-				class="w-full rounded border p-2"
-			>
-				<option>All</option>
-				<option>Add/Remove...</option>
-			</select>
-		</div>
-
-		<div>
-			<label for="region-select" class="mb-1 block text-sm font-medium">Region</label>
-			<select id="region-select" bind:value={filterState.region} class="w-full rounded border p-2">
-				<option>County</option>
-				<option>State</option>
-			</select>
-		</div>
-
+	<div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
 		<div>
 			<label for="year-range" class="mb-1 block text-sm font-medium">Year</label>
 			<div class="flex items-center">
-				<button class="rounded-l border p-1" onclick={decrementYear}>◀</button>
-				<input
-					id="year-range"
-					type="range"
-					min="2015"
-					max="2022"
-					bind:value={filterState.year}
-					class="w-full"
-				/>
-				<button class="rounded-r border p-1" onclick={incrementYear}>▶</button>
-				<span class="ml-2">{filterState.year}</span>
+				<select id="year-select" bind:value={filterState.year} class="w-full rounded border p-2">
+					{#each uniqueYears as year}
+						<option value={year}>{year}</option>
+					{/each}
+				</select>
 			</div>
 		</div>
 
 		<div>
-			<label for="pesticide-select" class="mb-1 block text-sm font-medium">Pesticide Type</label>
+			<label for="cancer-type-select" class="mb-1 block text-sm font-medium">Cancer Type</label>
 			<select
-				id="pesticide-select"
-				bind:value={filterState.pesticideType}
+				id="cancer-type-select"
+				bind:value={filterState.cancer_type}
 				class="w-full rounded border p-2"
 			>
-				<option>All</option>
-				<option>Herbicides</option>
-				<option>Insecticides</option>
-				<option>Fungicides</option>
-				<option>Rodenticides</option>
-			</select>
-		</div>
-
-		<div>
-			<label for="sex-select" class="mb-1 block text-sm font-medium">Sex</label>
-			<select id="sex-select" bind:value={filterState.sex} class="w-full rounded border p-2">
-				<option>Both</option>
-				<option>Male</option>
-				<option>Female</option>
+				{#each uniqueCancerTypes as cancerType}
+					<option value={cancerType}>{cancerType}</option>
+				{/each}
 			</select>
 		</div>
 	</div>
 
 	<!-- Map container -->
 	<div class="relative rounded border bg-gray-50 p-4">
-		<div
-			bind:this={mapContainer}
-			class="h-[600px] w-full cursor-grab overflow-hidden active:cursor-grabbing"
-		></div>
+		<div bind:this={mapContainer} class="h-[600px] w-full overflow-hidden"></div>
 
 		<!-- Zoom controls -->
 		<div class="absolute top-4 left-4 z-10 flex flex-col gap-2 rounded bg-white p-1 shadow">
@@ -349,4 +404,27 @@
 			>
 		</div>
 	</div>
+
+	<!-- Tooltip Element -->
+	<div
+		bind:this={tooltipElement}
+		class="tooltip bg-opacity-75 absolute z-20 hidden rounded bg-black px-2 py-1 text-sm whitespace-pre text-white shadow-md"
+		style="pointer-events: none;"
+	></div>
 </div>
+
+<style>
+	:global(.county-path) {
+		stroke: #fff; /* Optional: stroke for counties */
+		stroke-width: 0.1; /* Thin stroke */
+		transition: opacity 0.1s; /* Smooth hover effect */
+	}
+
+	:global(.county-path:hover) {
+		opacity: 0.8; /* Slightly fade on hover */
+	}
+
+	:global(.state-borders) {
+		pointer-events: none; /* Prevent borders from interfering with county hover */
+	}
+</style>
