@@ -29,12 +29,7 @@
 	});
 
 	// Title derived from state
-	let title = $state(`Cancer Prediction Rates by County (${filterState.year})`);
-
-	// Update title when year changes
-	$effect(() => {
-		title = `Cancer Prediction Rates by County (${filterState.year})`;
-	});
+	let title = $state('Cancer Prediction Rates by County');
 
 	// SVG dimensions
 	let width = 960;
@@ -125,10 +120,11 @@
 		// Find the domain for the color scale from the actual data
 		const predictionExtent = d3.extent(filteredData, (d) => d.prediction) as [number, number];
 
-		// Create color scale - using RdYlBu but reversed for cancer rates
+		// Create color scale using quantized Reds scheme, specifying string output type
 		const colorScale = d3
-			.scaleSequential(d3.interpolateRdYlBu)
-			.domain([predictionExtent[1], predictionExtent[0]]); // Higher values (more cancer) are red
+			.scaleQuantize<string>() // Specify <string> output type
+			.domain(predictionExtent)
+			.range(d3.schemeYlOrRd[9]); // Using 9 color steps
 
 		// Create projection for the map with padding
 		const projection = d3
@@ -136,6 +132,7 @@
 			.fitSize([width - 80, height - 80], nation)
 			.translate([width / 2, height / 2]);
 
+		// Ensure the path generator uses the projection
 		const path = d3.geoPath().projection(projection);
 
 		// Create SVG
@@ -146,12 +143,43 @@
 			.attr('height', '100%')
 			.attr('viewBox', [0, 0, width, height])
 			.attr('preserveAspectRatio', 'xMidYMid meet')
-			.attr('class', 'max-w-full h-auto');
+			.attr('class', 'max-w-full h-auto mx-auto'); // Added mx-auto for centering if needed
 
 		// Create a group for all map elements that will be zoomed
 		mapGroup = svg.append('g');
 
-		// Add zoom behavior
+		// Draw counties with improved styling and interactivity
+		const countyPaths = mapGroup
+			.append('g')
+			.attr('class', 'counties') // Group counties
+			.selectAll('path')
+			.data(counties.features)
+			.join('path')
+			.attr('fill', (d: any) => {
+				const prediction = cancerDataByCounty.get(d.id);
+				// Use a default color for missing data, ensure scale handles undefined if necessary
+				return prediction !== undefined ? colorScale(prediction) : '#ccc';
+			})
+			.attr('d', path) // Use the path generator with projection
+			.attr('class', 'county-path') // Add class for styling/hover
+			.attr('data-tooltip', (d: any) => {
+				// Add tooltip data
+				const prediction = cancerDataByCounty.get(d.id);
+				return prediction !== undefined ? `Rate: ${prediction.toFixed(2)}` : 'No data';
+			});
+
+		// Draw state borders with improved styling
+		mapGroup
+			.append('path')
+			.datum(stateBorders)
+			.attr('fill', 'none')
+			.attr('stroke', 'white') // Use white for contrast on darker reds
+			.attr('stroke-width', '0.5')
+			.attr('stroke-linejoin', 'round')
+			.attr('class', 'state-borders') // Add class for styling
+			.attr('d', path); // Use the path generator with projection
+
+		// Add zoom behavior (remains the same)
 		zoom = d3
 			.zoom<SVGSVGElement, unknown>()
 			.scaleExtent([1, 8])
@@ -163,37 +191,14 @@
 				mapGroup.attr('transform', event.transform);
 			});
 
-		// Initialize the zoom
+		// Initialize the zoom (remains the same)
 		svg.call(zoom);
-
-		// Draw counties
-		const countyPaths = mapGroup
-			.append('g')
-			.selectAll('path')
-			.data(counties.features)
-			.join('path')
-			.attr('fill', (d: any) => {
-				const prediction = cancerDataByCounty.get(d.id);
-				return prediction ? colorScale(prediction) : '#ccc';
-			})
-			.attr('d', path as any)
-			.attr('stroke', '#fff')
-			.attr('stroke-width', 0.1);
-
-		// Draw state borders
-		mapGroup
-			.append('path')
-			.datum(stateBorders)
-			.attr('fill', 'none')
-			.attr('stroke', '#000')
-			.attr('stroke-width', 0.5)
-			.attr('d', path);
 
 		// Create legend
 		const legendWidth = 300;
-		const legendHeight = 40;
-		const numColors = 10; // Number of color steps
+		const numColors = d3.schemeYlOrRd[9].length; // Use the actual length of the color scheme array
 		const step = (predictionExtent[1] - predictionExtent[0]) / numColors;
+		// Thresholds represent the START value for each color block
 		const thresholds = Array.from({ length: numColors }, (_, i) => predictionExtent[0] + i * step);
 
 		// Create legend group
@@ -207,47 +212,72 @@
 			.append('text')
 			.attr('class', 'legend-title')
 			.attr('fill', 'currentColor')
-			.attr('font-weight', 'bold')
+			.attr('font-weight', 'medium') // Keep updated font weight
 			.attr('x', 0)
 			.attr('y', 0)
 			.text('Cancer Prediction Rate');
 
-		// Add color rectangles and labels
+		// Add color rectangles, ticks, and labels for each threshold
 		thresholds.forEach((tick, i) => {
 			const xPosition = i * (legendWidth / numColors);
-			const yPosition = 10;
+			const yPosition = 10; // Y position for the color rects
 
-			// Add color rectangle
+			// --- Draw Color Rectangle ---
 			legend
 				.append('rect')
-				.attr('fill', colorScale(tick))
+				.attr('fill', colorScale(tick)) // Color corresponds to the range starting at 'tick'
 				.attr('x', xPosition)
 				.attr('y', yPosition)
 				.attr('height', 10)
 				.attr('width', legendWidth / numColors);
 
-			// Add tick line and label (skip first threshold)
-			if (i !== 0) {
-				// Add tick line
-				legend
-					.append('line')
-					.attr('stroke', 'currentColor')
-					.attr('x1', xPosition)
-					.attr('x2', xPosition)
-					.attr('y1', yPosition)
-					.attr('y2', yPosition + 20);
+			// --- Draw Tick Line ---
+			// Draw tick line for all thresholds, including the first one
+			legend
+				.append('line')
+				.attr('stroke', 'currentColor')
+				.attr('x1', xPosition)
+				.attr('x2', xPosition)
+				.attr('y1', yPosition) // Start line at the bottom of the rect
+				.attr('y2', yPosition + 20); // Extend line downwards
 
-				// Add tick label
-				legend
-					.append('text')
-					.attr('fill', 'currentColor')
-					.attr('text-anchor', 'middle')
-					.attr('dominant-baseline', 'middle')
-					.attr('x', xPosition)
-					.attr('y', yPosition + 30)
-					.text(tick.toFixed(2));
-			}
+			// --- Draw Tick Label ---
+			// Draw label for all thresholds, including the first one
+			legend
+				.append('text')
+				.attr('fill', 'currentColor')
+				.attr('text-anchor', 'middle')
+				.attr('dominant-baseline', 'middle')
+				.attr('x', xPosition)
+				.attr('y', yPosition + 35) // Use updated Y position for labels
+				.attr('font-size', '12px') // Keep updated font size
+				.text(tick.toFixed(2));
 		});
+
+		// --- Add Final Tick and Label for Maximum Value ---
+		const finalXPosition = legendWidth; // Position at the very end of the legend bar
+		const finalYPosition = 10;
+		const maxValue = predictionExtent[1];
+
+		// Add final tick line
+		legend
+			.append('line')
+			.attr('stroke', 'currentColor')
+			.attr('x1', finalXPosition)
+			.attr('x2', finalXPosition)
+			.attr('y1', finalYPosition)
+			.attr('y2', finalYPosition + 20);
+
+		// Add final tick label
+		legend
+			.append('text')
+			.attr('fill', 'currentColor')
+			.attr('text-anchor', 'middle')
+			.attr('dominant-baseline', 'middle')
+			.attr('x', finalXPosition)
+			.attr('y', finalYPosition + 35) // Use updated Y position
+			.attr('font-size', '12px') // Keep updated font size
+			.text(maxValue.toFixed(2));
 	}
 
 	// Zoom functions remain the same
@@ -271,7 +301,7 @@
 </script>
 
 <div class="container mx-auto px-4 py-8">
-	<h1 class="mb-6 text-3xl font-bold">{title}</h1>
+	<h1 class="mb-6 text-3xl">{title}</h1>
 
 	<!-- Filter controls -->
 	<div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
@@ -312,10 +342,7 @@
 
 	<!-- Map container -->
 	<div class="relative rounded border bg-gray-50 p-4">
-		<div
-			bind:this={mapContainer}
-			class="h-[600px] w-full cursor-grab overflow-hidden active:cursor-grabbing"
-		></div>
+		<div bind:this={mapContainer} class="h-[600px] w-full overflow-hidden"></div>
 
 		<!-- Zoom controls -->
 		<div class="absolute top-4 left-4 z-10 flex flex-col gap-2 rounded bg-white p-1 shadow">
@@ -333,3 +360,21 @@
 		</div>
 	</div>
 </div>
+
+<style>
+	:global(.county-path) {
+		stroke: #fff; /* Optional: stroke for counties */
+		stroke-width: 0.1; /* Thin stroke */
+		transition: opacity 0.1s; /* Smooth hover effect */
+	}
+
+	:global(.county-path:hover) {
+		opacity: 0.8; /* Slightly fade on hover */
+		/* stroke: #333; /* Optional: darker stroke on hover */
+		/* stroke-width: 0.3; */
+	}
+
+	:global(.state-borders) {
+		pointer-events: none; /* Prevent borders from interfering with county hover */
+	}
+</style>
