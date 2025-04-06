@@ -37,6 +37,7 @@
 
 	// Create a container for the map
 	let mapContainer: HTMLDivElement;
+	let tooltipElement: HTMLDivElement; // Add this line for the tooltip div
 
 	// Store zoom behavior to reference in zoom buttons
 	let zoom: d3.ZoomBehavior<SVGSVGElement, unknown>;
@@ -57,21 +58,6 @@
 	// Get unique years and cancer types from data for filters
 	const uniqueYears = [...new Set(cancerData.map((d: CancerData) => d.year))].sort();
 	const uniqueCancerTypes = [...new Set(cancerData.map((d: CancerData) => d.cancer_type))].sort();
-
-	// Year control handlers
-	function decrementYear() {
-		const currentIndex = uniqueYears.indexOf(filterState.year);
-		if (currentIndex > 0) {
-			filterState.year = uniqueYears[currentIndex - 1];
-		}
-	}
-
-	function incrementYear() {
-		const currentIndex = uniqueYears.indexOf(filterState.year);
-		if (currentIndex < uniqueYears.length - 1) {
-			filterState.year = uniqueYears[currentIndex + 1];
-		}
-	}
 
 	function renderMap() {
 		// Clear previous map if it exists
@@ -148,8 +134,8 @@
 		// Create a group for all map elements that will be zoomed
 		mapGroup = svg.append('g');
 
-		// Draw counties with improved styling and interactivity
-		const countyPaths = mapGroup
+		// Draw counties with improved styling and interactivity + tooltips
+		mapGroup
 			.append('g')
 			.attr('class', 'counties') // Group counties
 			.selectAll('path')
@@ -157,15 +143,32 @@
 			.join('path')
 			.attr('fill', (d: any) => {
 				const prediction = cancerDataByCounty.get(d.id);
-				// Use a default color for missing data, ensure scale handles undefined if necessary
 				return prediction !== undefined ? colorScale(prediction) : '#ccc';
 			})
 			.attr('d', path) // Use the path generator with projection
 			.attr('class', 'county-path') // Add class for styling/hover
-			.attr('data-tooltip', (d: any) => {
-				// Add tooltip data
+			.on('mouseover', function (event, d: any) {
+				if (!tooltipElement) return;
 				const prediction = cancerDataByCounty.get(d.id);
-				return prediction !== undefined ? `Rate: ${prediction.toFixed(2)}` : 'No data';
+				const tooltipText =
+					prediction !== undefined
+						? `FIPS: ${d.id}\nRate: ${prediction.toFixed(2)}`
+						: `FIPS: ${d.id}\nNo data`;
+
+				tooltipElement.textContent = tooltipText;
+				tooltipElement.classList.remove('hidden');
+				d3.select(this).style('opacity', 0.7); // Highlight path
+			})
+			.on('mousemove', function (event) {
+				if (!tooltipElement) return;
+				// Position tooltip near cursor
+				tooltipElement.style.left = `${event.pageX + 15}px`;
+				tooltipElement.style.top = `${event.pageY + 10}px`;
+			})
+			.on('mouseout', function () {
+				if (!tooltipElement) return;
+				tooltipElement.classList.add('hidden');
+				d3.select(this).style('opacity', 1); // Remove highlight
 			});
 
 		// Draw state borders with improved styling
@@ -304,17 +307,15 @@
 	<h1 class="mb-6 text-3xl">{title}</h1>
 
 	<!-- Filter controls -->
-	<div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
+	<div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
 		<div>
 			<label for="year-range" class="mb-1 block text-sm font-medium">Year</label>
 			<div class="flex items-center">
-				<button class="rounded-l border p-1" onclick={decrementYear}>◀</button>
 				<select id="year-select" bind:value={filterState.year} class="w-full rounded border p-2">
 					{#each uniqueYears as year}
 						<option value={year}>{year}</option>
 					{/each}
 				</select>
-				<button class="rounded-r border p-1" onclick={incrementYear}>▶</button>
 			</div>
 		</div>
 
@@ -328,14 +329,6 @@
 				{#each uniqueCancerTypes as cancerType}
 					<option value={cancerType}>{cancerType}</option>
 				{/each}
-			</select>
-		</div>
-
-		<div>
-			<label for="region-select" class="mb-1 block text-sm font-medium">Region</label>
-			<select id="region-select" bind:value={filterState.region} class="w-full rounded border p-2">
-				<option>County</option>
-				<option>State</option>
 			</select>
 		</div>
 	</div>
@@ -359,6 +352,13 @@
 			>
 		</div>
 	</div>
+
+	<!-- Tooltip Element -->
+	<div
+		bind:this={tooltipElement}
+		class="tooltip bg-opacity-75 absolute z-20 hidden rounded bg-black px-2 py-1 text-sm whitespace-pre text-white shadow-md"
+		style="pointer-events: none;"
+	></div>
 </div>
 
 <style>
