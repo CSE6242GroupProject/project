@@ -5,34 +5,35 @@
 	import { feature, mesh } from 'topojson-client';
 	import type { PageProps } from './$types';
 
-	// Define the PesticideData type
-	type PesticideData = {
-		countyId: string;
-		pesticideType: string;
-		pesticideUsage: number;
-		cancerRate: number;
+	// Define the CancerData type to match your JSON structure
+	type CancerData = {
 		year: number;
+		state_fips_code: number;
+		county_fips_code: number;
+		cancer_type: string;
+		prediction: number;
 	};
 
 	// Import data from load function using Svelte 5 runes
 	let { data }: PageProps = $props();
 
+	// Ensure cancerData exists with a default empty array
+	const cancerData = data.cancerData ?? [];
+
 	// States for the filters
 	let filterState = $state({
-		indicator: 'Pesticide Impact',
+		year: 1992, // Updated to match your data's starting year
+		cancer_type: 'Brain and nervous system cancer', // Updated to match your data
 		location: 'All',
-		region: 'County',
-		year: 2022,
-		pesticideType: 'All',
-		sex: 'Both'
+		region: 'County'
 	});
 
 	// Title derived from state
-	let title = $state(`Impact of Pesticides on Cancer Rates by County (${filterState.year})`);
+	let title = $state(`Cancer Prediction Rates by County (${filterState.year})`);
 
 	// Update title when year changes
 	$effect(() => {
-		title = `Impact of Pesticides on Cancer Rates by County (${filterState.year})`;
+		title = `Cancer Prediction Rates by County (${filterState.year})`;
 	});
 
 	// SVG dimensions
@@ -58,19 +59,28 @@
 		renderMap();
 	});
 
+	// Get unique years and cancer types from data for filters
+	const uniqueYears = [...new Set(cancerData.map((d: CancerData) => d.year))].sort();
+	const uniqueCancerTypes = [...new Set(cancerData.map((d: CancerData) => d.cancer_type))].sort();
+
 	// Year control handlers
 	function decrementYear() {
-		filterState.year = Math.max(2015, filterState.year - 1);
+		const currentIndex = uniqueYears.indexOf(filterState.year);
+		if (currentIndex > 0) {
+			filterState.year = uniqueYears[currentIndex - 1];
+		}
 	}
 
 	function incrementYear() {
-		filterState.year = Math.min(2022, filterState.year + 1);
+		const currentIndex = uniqueYears.indexOf(filterState.year);
+		if (currentIndex < uniqueYears.length - 1) {
+			filterState.year = uniqueYears[currentIndex + 1];
+		}
 	}
 
 	function renderMap() {
 		// Clear previous map if it exists
 		if (mapContainer) {
-			// Use D3 to clear the container instead of direct DOM manipulation
 			d3.select(mapContainer).selectAll('*').remove();
 		}
 
@@ -101,22 +111,24 @@
 		) as unknown as Geometry;
 
 		// Filter data based on selected filters
-		const filteredData =
-			data.pesticidesData?.filter((d: PesticideData) => {
-				return (
-					(filterState.pesticideType === 'All' || d.pesticideType === filterState.pesticideType) &&
-					d.year === filterState.year
-				);
-			}) || [];
-
-		// Create map of pesticide data by county ID for easy lookup
-		const pesticidesDataByCounty = new Map<string, PesticideData>();
-		filteredData.forEach((d: PesticideData) => {
-			pesticidesDataByCounty.set(d.countyId, d);
+		const filteredData = cancerData.filter((d: CancerData) => {
+			return d.year === filterState.year && d.cancer_type === filterState.cancer_type;
 		});
 
-		// Create color scale - using RdYlBu but reversed as in the image
-		const colorScale = d3.scaleSequential(d3.interpolateRdYlBu).domain([0.6, 0]); // Higher values (more cancer) are red, lower are blue
+		// Create map of cancer data by county ID for easy lookup
+		const cancerDataByCounty = new Map<string, number>();
+		filteredData.forEach((d: CancerData) => {
+			const fips = `${d.state_fips_code.toString().padStart(2, '0')}${d.county_fips_code.toString().padStart(3, '0')}`;
+			cancerDataByCounty.set(fips, d.prediction);
+		});
+
+		// Find the domain for the color scale from the actual data
+		const predictionExtent = d3.extent(filteredData, (d) => d.prediction) as [number, number];
+
+		// Create color scale - using RdYlBu but reversed for cancer rates
+		const colorScale = d3
+			.scaleSequential(d3.interpolateRdYlBu)
+			.domain([predictionExtent[1], predictionExtent[0]]); // Higher values (more cancer) are red
 
 		// Create projection for the map with padding
 		const projection = d3
@@ -137,7 +149,7 @@
 			.attr('class', 'max-w-full h-auto');
 
 		// Create a group for all map elements that will be zoomed
-		mapGroup = svg.append('g') as d3.Selection<SVGGElement, unknown, null, undefined>;
+		mapGroup = svg.append('g');
 
 		// Add zoom behavior
 		zoom = d3
@@ -161,8 +173,8 @@
 			.data(counties.features)
 			.join('path')
 			.attr('fill', (d: any) => {
-				const countyData = pesticidesDataByCounty.get(d.id);
-				return countyData ? colorScale(countyData.cancerRate) : '#ccc';
+				const prediction = cancerDataByCounty.get(d.id);
+				return prediction ? colorScale(prediction) : '#ccc';
 			})
 			.attr('d', path as any)
 			.attr('stroke', '#fff')
@@ -177,71 +189,80 @@
 			.attr('stroke-width', 0.5)
 			.attr('d', path);
 
-		// Create legend - keep legend outside of the zoom group
-		const legendWidth = 400;
-		const legendHeight = 20;
+		// Create legend
+		const legendWidth = 300;
+		const legendHeight = 40;
+		const numColors = 10; // Number of color steps
+		const step = (predictionExtent[1] - predictionExtent[0]) / numColors;
+		const thresholds = Array.from({ length: numColors }, (_, i) => predictionExtent[0] + i * step);
 
-		// Create legend scale
-		const legendX = d3.scaleLinear().domain([0, 0.6]).range([0, legendWidth]);
-		const legendAxis = d3.axisBottom(legendX).tickSize(13).ticks(8);
-
-		// Position legend with more space from the bottom
+		// Create legend group
 		const legend = svg
 			.append('g')
-			.attr('transform', `translate(${(width - legendWidth) / 2}, ${height - 30})`);
+			.attr('class', 'legend')
+			.attr('transform', `translate(${(width - legendWidth) / 2}, 20)`);
 
-		// Create gradient for legend
-		const defs = svg.append('defs');
-		const linearGradient = defs
-			.append('linearGradient')
-			.attr('id', 'legend-gradient')
-			.attr('x1', '0%')
-			.attr('y1', '0%')
-			.attr('x2', '100%')
-			.attr('y2', '0%');
-
-		// Add color stops to gradient
-		const stops = d3.range(0, 1.01, 0.1);
-		stops.forEach((stop) => {
-			linearGradient
-				.append('stop')
-				.attr('offset', `${stop * 100}%`)
-				.attr('stop-color', colorScale(0.6 * (1 - stop)));
-		});
-
-		// Draw colored rectangle using gradient
+		// Add legend title
 		legend
-			.append('rect')
+			.append('text')
+			.attr('class', 'legend-title')
+			.attr('fill', 'currentColor')
+			.attr('font-weight', 'bold')
 			.attr('x', 0)
 			.attr('y', 0)
-			.attr('width', legendWidth)
-			.attr('height', legendHeight)
-			.style('fill', 'url(#legend-gradient)');
+			.text('Cancer Prediction Rate');
 
-		// Add axis to legend
-		legend
-			.append('g')
-			.call(legendAxis)
-			.selectAll('text')
-			.style('text-anchor', 'middle')
-			.attr('dy', '10px');
+		// Add color rectangles and labels
+		thresholds.forEach((tick, i) => {
+			const xPosition = i * (legendWidth / numColors);
+			const yPosition = 10;
+
+			// Add color rectangle
+			legend
+				.append('rect')
+				.attr('fill', colorScale(tick))
+				.attr('x', xPosition)
+				.attr('y', yPosition)
+				.attr('height', 10)
+				.attr('width', legendWidth / numColors);
+
+			// Add tick line and label (skip first threshold)
+			if (i !== 0) {
+				// Add tick line
+				legend
+					.append('line')
+					.attr('stroke', 'currentColor')
+					.attr('x1', xPosition)
+					.attr('x2', xPosition)
+					.attr('y1', yPosition)
+					.attr('y2', yPosition + 20);
+
+				// Add tick label
+				legend
+					.append('text')
+					.attr('fill', 'currentColor')
+					.attr('text-anchor', 'middle')
+					.attr('dominant-baseline', 'middle')
+					.attr('x', xPosition)
+					.attr('y', yPosition + 30)
+					.text(tick.toFixed(2));
+			}
+		});
 	}
 
-	// Zoom in function
+	// Zoom functions remain the same
 	function zoomIn() {
 		if (svg && zoom) {
 			svg.transition().duration(300).call(zoom.scaleBy, 1.5);
 		}
 	}
 
-	// Zoom out function
 	function zoomOut() {
 		if (svg && zoom) {
 			svg.transition().duration(300).call(zoom.scaleBy, 0.75);
 		}
 	}
 
-	// Reset zoom function
 	function resetZoom() {
 		if (svg && zoom) {
 			svg.transition().duration(300).call(zoom.transform, d3.zoomIdentity);
@@ -253,27 +274,30 @@
 	<h1 class="mb-6 text-3xl font-bold">{title}</h1>
 
 	<!-- Filter controls -->
-	<div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
+	<div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
 		<div>
-			<label for="indicator-select" class="mb-1 block text-sm font-medium">Indicator</label>
-			<select
-				id="indicator-select"
-				bind:value={filterState.indicator}
-				class="w-full rounded border p-2"
-			>
-				<option>Pesticide Impact</option>
-			</select>
+			<label for="year-range" class="mb-1 block text-sm font-medium">Year</label>
+			<div class="flex items-center">
+				<button class="rounded-l border p-1" onclick={decrementYear}>◀</button>
+				<select id="year-select" bind:value={filterState.year} class="w-full rounded border p-2">
+					{#each uniqueYears as year}
+						<option value={year}>{year}</option>
+					{/each}
+				</select>
+				<button class="rounded-r border p-1" onclick={incrementYear}>▶</button>
+			</div>
 		</div>
 
 		<div>
-			<label for="location-select" class="mb-1 block text-sm font-medium">Locations</label>
+			<label for="cancer-type-select" class="mb-1 block text-sm font-medium">Cancer Type</label>
 			<select
-				id="location-select"
-				bind:value={filterState.location}
+				id="cancer-type-select"
+				bind:value={filterState.cancer_type}
 				class="w-full rounded border p-2"
 			>
-				<option>All</option>
-				<option>Add/Remove...</option>
+				{#each uniqueCancerTypes as cancerType}
+					<option value={cancerType}>{cancerType}</option>
+				{/each}
 			</select>
 		</div>
 
@@ -282,47 +306,6 @@
 			<select id="region-select" bind:value={filterState.region} class="w-full rounded border p-2">
 				<option>County</option>
 				<option>State</option>
-			</select>
-		</div>
-
-		<div>
-			<label for="year-range" class="mb-1 block text-sm font-medium">Year</label>
-			<div class="flex items-center">
-				<button class="rounded-l border p-1" onclick={decrementYear}>◀</button>
-				<input
-					id="year-range"
-					type="range"
-					min="2015"
-					max="2022"
-					bind:value={filterState.year}
-					class="w-full"
-				/>
-				<button class="rounded-r border p-1" onclick={incrementYear}>▶</button>
-				<span class="ml-2">{filterState.year}</span>
-			</div>
-		</div>
-
-		<div>
-			<label for="pesticide-select" class="mb-1 block text-sm font-medium">Pesticide Type</label>
-			<select
-				id="pesticide-select"
-				bind:value={filterState.pesticideType}
-				class="w-full rounded border p-2"
-			>
-				<option>All</option>
-				<option>Herbicides</option>
-				<option>Insecticides</option>
-				<option>Fungicides</option>
-				<option>Rodenticides</option>
-			</select>
-		</div>
-
-		<div>
-			<label for="sex-select" class="mb-1 block text-sm font-medium">Sex</label>
-			<select id="sex-select" bind:value={filterState.sex} class="w-full rounded border p-2">
-				<option>Both</option>
-				<option>Male</option>
-				<option>Female</option>
 			</select>
 		</div>
 	</div>
