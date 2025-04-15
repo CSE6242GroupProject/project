@@ -3,27 +3,18 @@
 	import * as d3 from 'd3';
 	import type { Feature, FeatureCollection, Geometry } from 'geojson';
 	import { feature, mesh } from 'topojson-client';
-	import type { PageProps } from './$types';
-
-	// Define the CancerData type to match your JSON structure
-	type CancerData = {
-		year: number;
-		state_fips_code: number;
-		county_fips_code: number;
-		cancer_type: string;
-		prediction: number;
-	};
+	import type { PageData } from './$types';
 
 	// Import data from load function using Svelte 5 runes
-	let { data }: PageProps = $props();
+	let { data }: { data: PageData } = $props();
 
 	// Ensure cancerData exists with a default empty array
 	const cancerData = data.cancerData ?? [];
 
 	// States for the filters
 	let filterState = $state({
-		year: 1992, // Updated to match your data's starting year
-		cancer_type: 'Brain and nervous system cancer', // Updated to match your data
+		year: 1992,
+		cancerType: 'Brain and nervous system',
 		location: 'All',
 		region: 'County'
 	});
@@ -44,8 +35,8 @@
 	let mapGroup: d3.Selection<SVGGElement, unknown, null, undefined>;
 
 	// Get unique years and cancer types from data for filters
-	const uniqueYears = [...new Set(cancerData.map((d: CancerData) => d.year))].sort();
-	const uniqueCancerTypes = [...new Set(cancerData.map((d: CancerData) => d.cancer_type))].sort();
+	const uniqueYears = [...new Set(cancerData.map((d) => d.year))].sort();
+	const uniqueCancerTypes = [...new Set(cancerData.map((d) => d.cancerType))].sort();
 
 	// Pre-compute county paths and only redraw colors
 	let counties: FeatureCollection;
@@ -60,15 +51,14 @@
 	// Function to get filtered data and calculate the prediction map
 	function getFilteredData() {
 		// Filter data based on selected filters
-		const filteredData = cancerData.filter((d: CancerData) => {
-			return d.year === filterState.year && d.cancer_type === filterState.cancer_type;
+		const filteredData = cancerData.filter((d) => {
+			return d.year === filterState.year && d.cancerType === filterState.cancerType;
 		});
 
 		// Create map of cancer data by county ID for easy lookup
 		const cancerDataByCounty = new Map<string, number>();
-		filteredData.forEach((d: CancerData) => {
-			const fips = `${d.state_fips_code.toString().padStart(2, '0')}${d.county_fips_code.toString().padStart(3, '0')}`;
-			cancerDataByCounty.set(fips, d.prediction);
+		filteredData.forEach((d) => {
+			cancerDataByCounty.set(d.fips, d.prediction);
 		});
 
 		// Find the domain for the color scale from the actual data
@@ -78,6 +68,12 @@
 		colorScale = d3.scaleQuantize<string>().domain(predictionExtent).range(d3.schemeYlOrRd[9]);
 
 		return { filteredData, cancerDataByCounty };
+	}
+
+	// Helper function to format numbers with appropriate decimal places
+	function formatPrediction(value: number): string {
+		const absValue = Math.abs(value);
+		return absValue >= 100 && absValue < 1000 ? value.toFixed(1) : value.toFixed(2);
 	}
 
 	// Function to update map colors without redrawing
@@ -98,7 +94,7 @@
 			const prediction = cancerDataByCounty.get(d.id);
 			const tooltipText =
 				prediction !== undefined
-					? `FIPS: ${d.id}\nRate: ${prediction.toFixed(2)}`
+					? `FIPS: ${d.id}\nRate: ${formatPrediction(prediction)}`
 					: `FIPS: ${d.id}\nNo data`;
 
 			tooltipElement.textContent = tooltipText;
@@ -163,7 +159,7 @@
 				.attr('x', xPosition)
 				.attr('y', yPosition + 35)
 				.attr('font-size', '12px')
-				.text(tick.toFixed(2));
+				.text(formatPrediction(tick));
 		});
 
 		// --- Add Final Tick and Label for Maximum Value ---
@@ -189,7 +185,7 @@
 			.attr('x', finalXPosition)
 			.attr('y', finalYPosition + 35)
 			.attr('font-size', '12px')
-			.text(maxValue.toFixed(2));
+			.text(formatPrediction(maxValue));
 	}
 
 	// Initialize the map - only runs once
@@ -268,7 +264,7 @@
 				const prediction = cancerDataByCounty.get(d.id);
 				const tooltipText =
 					prediction !== undefined
-						? `FIPS: ${d.id}\nRate: ${prediction.toFixed(2)}`
+						? `FIPS: ${d.id}\nRate: ${formatPrediction(prediction)}`
 						: `FIPS: ${d.id}\nNo data`;
 
 				tooltipElement.textContent = tooltipText;
@@ -375,11 +371,11 @@
 			<label for="cancer-type-select" class="mb-1 block text-sm font-medium">Cancer Type</label>
 			<select
 				id="cancer-type-select"
-				bind:value={filterState.cancer_type}
+				bind:value={filterState.cancerType}
 				class="w-full rounded border p-2"
 			>
 				{#each uniqueCancerTypes as cancerType}
-					<option value={cancerType}>{cancerType}</option>
+					<option value={cancerType}>{cancerType[0].toUpperCase() + cancerType.slice(1)}</option>
 				{/each}
 			</select>
 		</div>
